@@ -84,3 +84,100 @@ elif old in text:
     print('Runtime hotfix applied: notification DB reads limited to push-worthy transitions')
 else:
     raise SystemExit('Runtime hotfix target not found in notification-service.ts')
+
+# 3) Reduce mobile live-view traffic. 150 ms was unnecessarily aggressive for a phone UI.
+p = Path('apps/api/src/config.ts')
+text = p.read_text(encoding='utf-8')
+old = "uiBroadcastIntervalMs: integer('UI_BROADCAST_INTERVAL_MS', env.UI_BROADCAST_INTERVAL_MS, 150, 100),"
+new = "uiBroadcastIntervalMs: integer('UI_BROADCAST_INTERVAL_MS', env.UI_BROADCAST_INTERVAL_MS, 1000, 100),"
+if new in text:
+    print('Runtime hotfix already applied: UI broadcast interval')
+elif old in text:
+    p.write_text(text.replace(old, new), encoding='utf-8')
+    print('Runtime hotfix applied: UI broadcast interval reduced to 1 Hz')
+else:
+    raise SystemExit('Runtime hotfix target not found in config.ts')
+
+# 4) Respect SSE backpressure. Slow/backgrounded mobile browsers must not make Node buffer
+#    an unbounded number of full market snapshots in memory.
+p = Path('apps/api/src/app.ts')
+text = p.read_text(encoding='utf-8')
+old = '''    if (request.method === 'GET' && url.pathname === '/events') {
+      response.writeHead(200, {
+        ...corsHeaders(request, config),
+        'content-type': 'text/event-stream; charset=utf-8',
+        connection: 'keep-alive',
+        'x-accel-buffering': 'no',
+      });
+      response.write(': connected\\n\\n');
+      const unsubscribe = market.subscribe((snapshot) => {
+        response.write(`data: ${JSON.stringify(snapshot)}\\n\\n`);
+      });
+      const heartbeat = setInterval(() => response.write(': heartbeat\\n\\n'), 15_000);
+      request.on('close', () => {
+        clearInterval(heartbeat);
+        unsubscribe();
+      });
+      return;
+    }
+'''
+new = '''    if (request.method === 'GET' && url.pathname === '/events') {
+      response.writeHead(200, {
+        ...corsHeaders(request, config),
+        'content-type': 'text/event-stream; charset=utf-8',
+        'cache-control': 'no-cache',
+        connection: 'keep-alive',
+        'x-accel-buffering': 'no',
+      });
+      response.write(': connected\\n\\n');
+
+      let blocked = false;
+      let pendingSnapshot: unknown | null = null;
+      let closed = false;
+
+      const writeSnapshot = (snapshot: unknown) => {
+        if (closed) return;
+        const accepted = response.write(`data: ${JSON.stringify(snapshot)}\\n\\n`);
+        if (!accepted) blocked = true;
+      };
+
+      const unsubscribe = market.subscribe((snapshot) => {
+        if (blocked) {
+          pendingSnapshot = snapshot;
+          return;
+        }
+        writeSnapshot(snapshot);
+      });
+
+      response.on('drain', () => {
+        if (closed) return;
+        blocked = false;
+        const pending = pendingSnapshot;
+        pendingSnapshot = null;
+        if (pending !== null) writeSnapshot(pending);
+      });
+
+      const heartbeat = setInterval(() => {
+        if (closed || blocked) return;
+        if (!response.write(': heartbeat\\n\\n')) blocked = true;
+      }, 15_000);
+
+      const cleanup = () => {
+        if (closed) return;
+        closed = true;
+        pendingSnapshot = null;
+        clearInterval(heartbeat);
+        unsubscribe();
+      };
+      request.on('close', cleanup);
+      response.on('close', cleanup);
+      return;
+    }
+'''
+if new in text:
+    print('Runtime hotfix already applied: SSE backpressure')
+elif old in text:
+    p.write_text(text.replace(old, new), encoding='utf-8')
+    print('Runtime hotfix applied: SSE backpressure drops stale snapshots instead of buffering')
+else:
+    raise SystemExit('Runtime hotfix target not found in app.ts')
