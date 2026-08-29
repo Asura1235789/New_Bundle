@@ -12,6 +12,7 @@ python3 honor-push-hotfix.py
 
 if [ "${FSM_ROLE:-web}" = "api" ]; then
   python3 deploy-patch.py
+  python3 sql-proxy-serialize-hotfix.py
   python3 runtime-hotfix.py
   python3 fix-generated-ts.py
   npm install --include=dev
