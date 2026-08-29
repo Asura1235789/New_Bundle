@@ -2,5 +2,8 @@
   "name": "crypto-futures-monitor-deploy-wrapper",
   "private": true,
   "engines": { "node": ">=22.13.0" },
-  "scripts": { "start": "echo deploy wrapper" }
+  "scripts": {
+    "build": "sh railway-build.sh",
+    "start": "sh railway-start.sh"
+  }
 }
