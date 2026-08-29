@@ -8,6 +8,8 @@ done | tar -xzf -
 mkdir -p .openai
 printf '%s\n' '{"project_id":"appgprj_6a913eeb9ab881918392b50db9c4fd10","d1":null,"r2":null}' > .openai/hosting.json
 
+python3 honor-push-hotfix.py
+
 if [ "${FSM_ROLE:-web}" = "api" ]; then
   python3 deploy-patch.py
   python3 runtime-hotfix.py
