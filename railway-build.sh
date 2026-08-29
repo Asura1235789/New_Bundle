@@ -10,6 +10,7 @@ printf '%s\n' '{"project_id":"appgprj_6a913eeb9ab881918392b50db9c4fd10","d1":nul
 
 if [ "${FSM_ROLE:-web}" = "api" ]; then
   python3 deploy-patch.py
+  python3 fix-generated-ts.py
   npm install --include=dev
   npm run build:api
   test -f apps/api/dist/server.js
