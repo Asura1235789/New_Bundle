@@ -115,28 +115,45 @@ methods = '''  private async ensureMoveState(): Promise<void> {
     const change = item.change24hPercent;
     if (item.dataStatus !== 'LIVE' || change === null || !Number.isFinite(change)) return;
 
-    const nextBand: 'NONE' | 'UP' | 'DOWN' = change >= 10 ? 'UP' : change <= -10 ? 'DOWN' : 'NONE';
     const previousBand = this.moveBands.get(item.symbol) ?? 'NONE';
+    // Enter at ±10%, but only re-arm after returning inside ±8%.
+    // This hysteresis prevents alert storms when price oscillates around the threshold.
+    let nextBand: 'NONE' | 'UP' | 'DOWN' = previousBand;
+    if (previousBand === 'NONE') {
+      nextBand = change >= 10 ? 'UP' : change <= -10 ? 'DOWN' : 'NONE';
+    } else if (previousBand === 'UP') {
+      nextBand = change <= -10 ? 'DOWN' : change < 8 ? 'NONE' : 'UP';
+    } else {
+      nextBand = change >= 10 ? 'UP' : change > -8 ? 'NONE' : 'DOWN';
+    }
     if (nextBand === previousBand) return;
 
-    if (nextBand !== 'NONE') {
-      const directionText = nextBand === 'UP' ? '上涨' : '下跌';
-      const signed = `${change >= 0 ? '+' : ''}${change.toFixed(2)}%`;
-      await this.dispatch({
-        eventKey: `MARKET_MOVE:${item.symbol}:${nextBand}:${Math.floor(Date.now() / 60000)}`,
-        eventType: 'MARKET_MOVE',
-        symbol: item.symbol,
-        signalUid: null,
-        title: `${nextBand === 'UP' ? '🚀' : '📉'} ${item.symbol} 24h ${directionText} ${signed}`,
-        body: `当前 ${item.lastPrice ?? '—'} · 24h 变动 ${signed} · 独立行情异动提醒，不代表 LONG_READY/SHORT_READY。`,
-        url: `/?symbol=${encodeURIComponent(item.symbol)}`,
-        tag: `market-move-${item.symbol}-${nextBand}`,
-        data: { change24hPercent: change, band: nextBand },
-      });
-    }
-
-    await this.repository.setMarketMoveAlertState(item.symbol, nextBand, change);
+    // Reserve the new state before awaiting network/DB work so overlapping snapshots
+    // cannot send the same transition dozens of times.
     this.moveBands.set(item.symbol, nextBand);
+
+    try {
+      if (nextBand !== 'NONE') {
+        const directionText = nextBand === 'UP' ? '上涨' : '下跌';
+        const signed = `${change >= 0 ? '+' : ''}${change.toFixed(2)}%`;
+        await this.dispatch({
+          eventKey: `MARKET_MOVE:${item.symbol}:${nextBand}`,
+          eventType: 'MARKET_MOVE',
+          symbol: item.symbol,
+          signalUid: null,
+          title: `${nextBand === 'UP' ? '🚀' : '📉'} ${item.symbol} 24h ${directionText} ${signed}`,
+          body: `当前 ${item.lastPrice ?? '—'} · 24h 变动 ${signed} · 独立行情异动提醒，不代表 LONG_READY/SHORT_READY。`,
+          url: `/?symbol=${encodeURIComponent(item.symbol)}`,
+          tag: `market-move-${item.symbol}-${nextBand}`,
+          data: { change24hPercent: change, band: nextBand },
+        });
+      }
+      await this.repository.setMarketMoveAlertState(item.symbol, nextBand, change);
+    } catch (error) {
+      // Roll back the in-memory reservation so a transient delivery/DB failure can retry.
+      this.moveBands.set(item.symbol, previousBand);
+      throw error;
+    }
   }
 
 '''
@@ -150,4 +167,4 @@ text = text.replace(
     1,
 )
 p.write_text(text, encoding='utf-8')
-print('24h ±10% market move alert patch applied')
+print('24h ±10% market move alert patch applied with dedupe + hysteresis')
