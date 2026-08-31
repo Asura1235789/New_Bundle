@@ -14,6 +14,7 @@ if [ "${FSM_ROLE:-web}" = "api" ]; then
   python3 deploy-patch.py
   python3 sql-proxy-serialize-hotfix.py
   python3 runtime-hotfix.py
+  python3 candidate-persistence-throttle-hotfix.py
   python3 market-move-hotfix.py
   python3 suppress-preentry-invalidated-hotfix.py
   python3 trend-continuation-hotfix.py
