@@ -16,6 +16,7 @@ if [ "${FSM_ROLE:-web}" = "api" ]; then
   python3 runtime-hotfix.py
   python3 market-move-hotfix.py
   python3 suppress-preentry-invalidated-hotfix.py
+  python3 trend-continuation-hotfix.py
   python3 fix-generated-ts.py
   npm install --include=dev
   npm run build:api
