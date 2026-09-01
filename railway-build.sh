@@ -3,7 +3,7 @@ set -eu
 
 for f in runtime-parts/part*.b64; do
   base64 -d "$f"
-done | tar -xzf -
+done | tar --no-same-owner -xzf -
 
 mkdir -p .openai
 printf '%s\n' '{"project_id":"appgprj_6a913eeb9ab881918392b50db9c4fd10","d1":null,"r2":null}' > .openai/hosting.json
@@ -19,6 +19,7 @@ if [ "${FSM_ROLE:-web}" = "api" ]; then
   python3 suppress-preentry-invalidated-hotfix.py
   python3 trend-continuation-hotfix.py
   python3 signal-lifecycle-integrity-hotfix.py
+  python3 quiet-reliability-hotfix.py
   python3 fix-generated-ts.py
   npm install --include=dev
   npm run build:api
