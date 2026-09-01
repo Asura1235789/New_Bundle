@@ -185,6 +185,30 @@ replace_once(
 )
 
 
+repository_path = 'apps/api/src/watchlist-repository.ts'
+replace_once(
+    repository_path,
+    "    try {\n"
+    "      await client.query(`\n"
+    "        CREATE TABLE IF NOT EXISTS schema_migrations (",
+    "    try {\n"
+    "      // Emergency one-time cleanup: a failed historical backtest can fill a small\n"
+    "      // database so completely that even migration bookkeeping cannot allocate a page.\n"
+    "      // Only reproducible Binance candle cache rows are removed, and only before 0005.\n"
+    "      const migrationTable = await client.query<{ exists: boolean }>(\n"
+    "        `SELECT to_regclass('public.schema_migrations') IS NOT NULL AS exists`,\n"
+    "      );\n"
+    "      if (migrationTable.rows[0]?.exists) {\n"
+    "        const quietMigration = await client.query<{ applied: boolean }>(\n"
+    "          `SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE filename='0005_quiet_notifications.sql') AS applied`,\n"
+    "        );\n"
+    "        if (!quietMigration.rows[0]?.applied) await client.query('TRUNCATE TABLE candles');\n"
+    "      }\n"
+    "      await client.query(`\n"
+    "        CREATE TABLE IF NOT EXISTS schema_migrations (",
+)
+
+
 migration = Path('packages/database/migrations/0005_quiet_notifications.sql')
 migration.write_text("""-- Candle rows are a reproducible Binance cache, not user-authored records.
 -- Clear the oversized cache left by backtests; live monitoring immediately repopulates
