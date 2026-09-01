@@ -166,6 +166,11 @@ replace_once(
 )
 replace_once(
     backtest_path,
+    "    this.history = new BinanceHistoricalDataClient(config.binance.restBaseUrl, cache);",
+    "    this.history = new BinanceHistoricalDataClient(config.binance.restBaseUrl, cache, 500);",
+)
+replace_once(
+    backtest_path,
     "  private readonly gitCommit: string | null;",
     "  private readonly gitCommit: string | null;\n"
     "  private queue: Promise<void> = Promise.resolve();",
@@ -220,6 +225,94 @@ replace_once(
     "      }\n"
     "      await client.query(`\n"
     "        CREATE TABLE IF NOT EXISTS schema_migrations (",
+)
+
+
+replace_once(
+    market_path,
+    "  private readonly repairingSymbols = new Set<string>();\n"
+    "  private publicSocket: WebSocket | null = null;",
+    "  private readonly repairingSymbols = new Set<string>();\n"
+    "  private readonly backfillRetryTimers = new Map<string, NodeJS.Timeout>();\n"
+    "  private publicSocket: WebSocket | null = null;",
+)
+replace_once(
+    market_path,
+    "    for (const entry of this.entries.values()) {\n"
+    "      if (entry.state === 'ACTIVE') await this.activateSymbol(entry.symbol, false);\n"
+    "    }",
+    "    for (const entry of this.entries.values()) {\n"
+    "      if (entry.state !== 'ACTIVE') continue;\n"
+    "      try {\n"
+    "        await this.activateSymbol(entry.symbol, false);\n"
+    "      } catch (error) {\n"
+    "        this.markBackfillFailed(entry.symbol, error);\n"
+    "        this.scheduleBackfillRetry(entry.symbol, 60_000);\n"
+    "      }\n"
+    "    }",
+)
+replace_once(
+    market_path,
+    "    for (const timer of [this.reconnectTimer, this.rotationTimer, this.stableResetTimer, this.freshnessTimer, this.broadcastTimer]) {\n"
+    "      if (timer) clearTimeout(timer);\n"
+    "    }",
+    "    for (const timer of [this.reconnectTimer, this.rotationTimer, this.stableResetTimer, this.freshnessTimer, this.broadcastTimer, ...this.backfillRetryTimers.values()]) {\n"
+    "      if (timer) clearTimeout(timer);\n"
+    "    }\n"
+    "    this.backfillRetryTimers.clear();",
+)
+replace_once(
+    market_path,
+    "        log('error', 'Symbol activation failed', {\n"
+    "          symbol,\n"
+    "          error: error instanceof Error ? error.message : String(error),\n"
+    "        });\n"
+    "        this.emitNow();",
+    "        log('error', 'Symbol activation failed', {\n"
+    "          symbol,\n"
+    "          error: error instanceof Error ? error.message : String(error),\n"
+    "        });\n"
+    "        this.scheduleBackfillRetry(symbol, 60_000);\n"
+    "        this.emitNow();",
+)
+replace_once(
+    market_path,
+    "  private async backfillSymbol(symbol: string): Promise<void> {",
+    "  private markBackfillFailed(symbol: string, error: unknown): void {\n"
+    "    const state = this.states.get(symbol) ?? blankState(symbol);\n"
+    "    this.states.set(symbol, state);\n"
+    "    state.repairing = false;\n"
+    "    state.dataStatus = 'DATA STALE';\n"
+    "    state.staleReason = `Binance 历史数据暂不可用，后台重试中：${error instanceof Error ? error.message : String(error)}`;\n"
+    "    log('warn', 'Backfill deferred; API remains online', { symbol, error: error instanceof Error ? error.message : String(error) });\n"
+    "  }\n\n"
+    "  private scheduleBackfillRetry(symbol: string, delayMs: number): void {\n"
+    "    if (this.stopped || this.backfillRetryTimers.has(symbol) || !this.entries.has(symbol)) return;\n"
+    "    const timer = setTimeout(() => {\n"
+    "      this.backfillRetryTimers.delete(symbol);\n"
+    "      if (this.stopped || this.entries.get(symbol)?.state !== 'ACTIVE') return;\n"
+    "      void this.activateSymbol(symbol, false).then(() => {\n"
+    "        log('info', 'Deferred Binance backfill recovered', { symbol });\n"
+    "        this.emitNow();\n"
+    "      }).catch((error: unknown) => {\n"
+    "        this.markBackfillFailed(symbol, error);\n"
+    "        this.scheduleBackfillRetry(symbol, Math.min(delayMs * 2, 15 * 60_000));\n"
+    "        this.emitNow();\n"
+    "      });\n"
+    "    }, delayMs);\n"
+    "    this.backfillRetryTimers.set(symbol, timer);\n"
+    "  }\n\n"
+    "  private async backfillSymbol(symbol: string): Promise<void> {",
+)
+replace_once(
+    market_path,
+    "  private releaseSymbolMemory(symbol: string): void {\n"
+    "    this.states.delete(symbol);",
+    "  private releaseSymbolMemory(symbol: string): void {\n"
+    "    const retryTimer = this.backfillRetryTimers.get(symbol);\n"
+    "    if (retryTimer) clearTimeout(retryTimer);\n"
+    "    this.backfillRetryTimers.delete(symbol);\n"
+    "    this.states.delete(symbol);",
 )
 
 
