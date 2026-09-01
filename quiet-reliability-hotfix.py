@@ -169,6 +169,17 @@ replace_once(
     "    this.history = new BinanceHistoricalDataClient(config.binance.restBaseUrl, cache);",
     "    this.history = new BinanceHistoricalDataClient(config.binance.restBaseUrl, cache, 500);",
 )
+
+# The replay fills an entry at a resting preferred/zone-edge price, then exits on a
+# touched stop/target. Charge the configured maker rate for entry and taker rate for
+# exit; the previous implementation accidentally charged taker on both legs and
+# never used makerFee.
+engine_path = 'packages/backtest-engine/src/index.ts'
+replace_once(
+    engine_path,
+    "  const feesQuotePerUnit = (active.entryPrice + exitPrice) * config.takerFee;",
+    "  const feesQuotePerUnit = active.entryPrice * config.makerFee + exitPrice * config.takerFee;",
+)
 replace_once(
     backtest_path,
     "  private readonly gitCommit: string | null;",
