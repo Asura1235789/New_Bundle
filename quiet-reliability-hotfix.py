@@ -541,4 +541,105 @@ test('public snapshots omit pivot history and keep four nearest zones per role',
 });
 """, encoding='utf-8')
 
+# Backtest-only balanced strategy. The live evaluator continues using
+# DEFAULT_SIGNAL_CONFIG; CURRENT and BALANCED_V1 can be compared safely with the
+# same production notification score floor before changing any live behaviour.
+signal_engine_path = 'packages/signal-engine/src/index.ts'
+replace_once(signal_engine_path,
+    "  maxRetestDistanceAtr: number;\n  expiresAfterMs: number;",
+    "  maxRetestDistanceAtr: number;\n  minimumRejectionWickAtr: number;\n  minimumRejectionBodyAtr: number;\n  minimumTrendSeparationAtr: number;\n  requireTrendSlope: boolean;\n  continuationMinimumVolumeRatio: number;\n  expiresAfterMs: number;")
+replace_once(signal_engine_path,
+    "  maxRetestDistanceAtr: 1.5,\n  expiresAfterMs:",
+    "  maxRetestDistanceAtr: 1.5,\n  minimumRejectionWickAtr: 0,\n  minimumRejectionBodyAtr: 0,\n  minimumTrendSeparationAtr: 0,\n  requireTrendSlope: false,\n  continuationMinimumVolumeRatio: 0,\n  expiresAfterMs:")
+replace_once(signal_engine_path,
+"""function lowerRejection(candle: Candle, zone: StructureZone): boolean {
+  const shape = candleShape(candle);
+  return shape.low <= zone.upper && shape.lowerWick >= Math.max(shape.body, Number.EPSILON) * 1.5 && shape.close >= zone.lower && shape.closeLocation >= 0.55;
+}
+function upperRejection(candle: Candle, zone: StructureZone): boolean {
+  const shape = candleShape(candle);
+  return shape.high >= zone.lower && shape.upperWick >= Math.max(shape.body, Number.EPSILON) * 1.5 && shape.close <= zone.upper && shape.closeLocation <= 0.45;
+}""",
+"""function lowerRejection(candle: Candle, zone: StructureZone, atr: number, config: SignalConfig): boolean {
+  const shape = candleShape(candle);
+  return shape.low <= zone.upper && shape.lowerWick >= Math.max(shape.body, Number.EPSILON) * 1.5
+    && shape.lowerWick >= atr * config.minimumRejectionWickAtr && shape.body >= atr * config.minimumRejectionBodyAtr
+    && shape.close >= zone.lower && shape.closeLocation >= 0.55;
+}
+function upperRejection(candle: Candle, zone: StructureZone, atr: number, config: SignalConfig): boolean {
+  const shape = candleShape(candle);
+  return shape.high >= zone.lower && shape.upperWick >= Math.max(shape.body, Number.EPSILON) * 1.5
+    && shape.upperWick >= atr * config.minimumRejectionWickAtr && shape.body >= atr * config.minimumRejectionBodyAtr
+    && shape.close <= zone.upper && shape.closeLocation <= 0.45;
+}
+function trendQuality(input: SignalInput, direction: Exclude<SignalBias, 'NEUTRAL'>, atr: number, config: SignalConfig): boolean {
+  const indicator = input.indicators['1h'];
+  if (!indicator?.ma25 || !indicator.ma99 || !(atr > 0)) return false;
+  const separationPassed = Math.abs(indicator.ma25 - indicator.ma99) / atr >= config.minimumTrendSeparationAtr;
+  if (!config.requireTrendSlope) return separationPassed;
+  const closes = closedCandles(input, '1h').map((candle) => value(candle.close));
+  if (closes.length < 26) return false;
+  const current = closes.slice(-25).reduce((sum, close) => sum + close, 0) / 25;
+  const previous = closes.slice(-26, -1).reduce((sum, close) => sum + close, 0) / 25;
+  return separationPassed && (direction === 'LONG' ? current > previous : current < previous);
+}""")
+replace_once(signal_engine_path, "lowerRejection(latest15, support)", "lowerRejection(latest15, support, atr, config)")
+replace_once(signal_engine_path, "upperRejection(latest15, resistance)", "upperRejection(latest15, resistance, atr, config)")
+replace_once(signal_engine_path,
+    "  const fiveMinuteTiming = executionTiming(input, direction);",
+    "  const fiveMinuteTiming = executionTiming(input, direction);\n  const alignedTrendQuality = oneHourBias === direction && trendQuality(input, direction, atr, config);")
+replace_once(signal_engine_path,
+    "addScore('TREND', oneHourBias === direction, config.scoreWeights.trend, `1h ${oneHourBias} 与方向一致`);",
+    "addScore('TREND', alignedTrendQuality, config.scoreWeights.trend, `1h ${oneHourBias} 方向、斜率与均线分离度合格`);")
+replace_once(signal_engine_path, "const strongTrendContinuation = oneHourBias === direction", "const strongTrendContinuation = alignedTrendQuality")
+replace_once(signal_engine_path,
+    "const volumeConfirmedOrContinuation = (volumeRatio ?? 0) >= config.minimumClosedVolumeRatio || strongTrendContinuation;",
+    "const volumeConfirmedOrContinuation = (volumeRatio ?? 0) >= config.minimumClosedVolumeRatio\n    || (strongTrendContinuation && (volumeRatio ?? 0) >= config.continuationMinimumVolumeRatio);")
+
+backtest_types_path = 'packages/backtest-engine/src/types.ts'
+replace_once(backtest_types_path,
+    "export type EntryBarPolicy = 'STOP_IF_TOUCHED_IGNORE_TARGETS' | 'MARK_AMBIGUOUS';",
+    "export type EntryBarPolicy = 'STOP_IF_TOUCHED_IGNORE_TARGETS' | 'MARK_AMBIGUOUS';\nexport type BacktestStrategyProfile = 'CURRENT' | 'BALANCED_V1';")
+replace_once(backtest_types_path,
+    "  executionConfig?: Partial<BacktestExecutionConfig>;\n  appVersion?: string;",
+    "  executionConfig?: Partial<BacktestExecutionConfig>;\n  strategyProfile?: BacktestStrategyProfile;\n  minimumSignalScore?: number;\n  appVersion?: string;")
+replace_once(backtest_types_path,
+    "  strategyConfigVersion: 'phase-4.1';\n  executionConfig:",
+    "  strategyConfigVersion: 'phase-4.1';\n  strategyProfile: BacktestStrategyProfile;\n  minimumSignalScore: number;\n  executionConfig:")
+
+replace_once(engine_path,
+    "import { evaluateSignal, SignalLifecycleRegistry, type SignalSnapshot } from '@fsm/signal-engine';",
+    "import { DEFAULT_SIGNAL_CONFIG, evaluateSignal, SignalLifecycleRegistry, type SignalConfig, type SignalSnapshot } from '@fsm/signal-engine';")
+replace_once(engine_path,
+    "  type BacktestExecutionConfig,\n  type BacktestMetrics,",
+    "  type BacktestExecutionConfig,\n  type BacktestStrategyProfile,\n  type BacktestMetrics,")
+replace_once(engine_path, "function defaultEvaluate(context: ReplayStrategyContext): SignalSnapshot {", """const BALANCED_V1_SIGNAL_CONFIG: SignalConfig = {
+  ...DEFAULT_SIGNAL_CONFIG,
+  minimumClosedVolumeRatio: 0.85, minimumTp1RR: 1.3, stopAtrBuffer: 0.4,
+  opposingZoneTooCloseAtr: 0.7, maxRetestSignalAgeBars: 4, maxRetestDistanceAtr: 1.3,
+  minimumRejectionWickAtr: 0.18, minimumRejectionBodyAtr: 0.03,
+  minimumTrendSeparationAtr: 0.12, requireTrendSlope: true, continuationMinimumVolumeRatio: 0.65,
+  scoreWeights: { trend: 14, zone: 13, rejection: 12, retest: 12, volume: 10, confluence: 9, execution: 10, riskReward: 10, opposingSpace: 6, health: 4 },
+};
+function signalConfigFor(profile: BacktestStrategyProfile): SignalConfig {
+  return profile === 'BALANCED_V1' ? BALANCED_V1_SIGNAL_CONFIG : DEFAULT_SIGNAL_CONFIG;
+}
+function defaultEvaluate(context: ReplayStrategyContext, signalConfig: SignalConfig): SignalSnapshot {""")
+replace_once(engine_path,
+    "    evaluatedAt: context.now,\n  });",
+    "    evaluatedAt: context.now,\n  }, signalConfig);")
+replace_once(engine_path,
+    "  const config: BacktestExecutionConfig = { ...DEFAULT_EXECUTION_CONFIG, ...request.executionConfig, fundingIncluded: false };\n  validateBacktestExecutionConfig(config);\n  const evaluator = options.evaluator ?? defaultEvaluate;",
+    "  const config: BacktestExecutionConfig = { ...DEFAULT_EXECUTION_CONFIG, ...request.executionConfig, fundingIncluded: false };\n  const strategyProfile: BacktestStrategyProfile = request.strategyProfile ?? 'CURRENT';\n  if (!['CURRENT', 'BALANCED_V1'].includes(strategyProfile)) throw new BacktestValidationError('INVALID_STRATEGY_PROFILE', '不支持的策略配置');\n  const minimumSignalScore = request.minimumSignalScore ?? 70;\n  if (!Number.isFinite(minimumSignalScore) || minimumSignalScore < 0 || minimumSignalScore > 100) throw new BacktestValidationError('INVALID_MINIMUM_SIGNAL_SCORE', '信号分数必须在 0 到 100 之间');\n  const signalConfig = signalConfigFor(strategyProfile);\n  validateBacktestExecutionConfig(config);\n  const evaluator = options.evaluator ?? ((context) => defaultEvaluate(context, signalConfig));")
+replace_once(engine_path,
+    "const ready = !trackingExistingTrade && signal.signalId && (signal.decision === 'LONG_READY' || signal.decision === 'SHORT_READY');",
+    "const ready = !trackingExistingTrade && signal.signalId && signal.score >= minimumSignalScore\n      && (signal.decision === 'LONG_READY' || signal.decision === 'SHORT_READY');")
+replace_once(engine_path,
+    "strategyConfigVersion: 'phase-4.1', executionConfig: config,",
+    "strategyConfigVersion: 'phase-4.1', strategyProfile, minimumSignalScore, executionConfig: config,")
+
+replace_once(backtest_path,
+    "    const request: BacktestRequest = {\n      symbol, startTime, endTime, appVersion: this.appVersion, gitCommit: this.gitCommit,",
+    "    const strategyProfile = body.strategyProfile === 'BALANCED_V1' ? 'BALANCED_V1' : body.strategyProfile === 'CURRENT' || body.strategyProfile === undefined ? 'CURRENT' : null;\n    if (!strategyProfile) throw new MarketServiceError(400, 'INVALID_STRATEGY_PROFILE', 'strategyProfile 仅支持 CURRENT 或 BALANCED_V1');\n    const minimumSignalScore = body.minimumSignalScore === undefined ? 70 : Number(body.minimumSignalScore);\n    if (!Number.isFinite(minimumSignalScore) || minimumSignalScore < 0 || minimumSignalScore > 100) throw new MarketServiceError(400, 'INVALID_MINIMUM_SIGNAL_SCORE', 'minimumSignalScore 必须在 0 到 100 之间');\n    const request: BacktestRequest = {\n      symbol, startTime, endTime, strategyProfile, minimumSignalScore, appVersion: this.appVersion, gitCommit: this.gitCommit,")
+
 print('Quiet notification allowlist, exact Binance 24h ticker, listener isolation, API logging, and settings migration applied')
