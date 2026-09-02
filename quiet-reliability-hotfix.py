@@ -48,6 +48,7 @@ replace_once(
     market_path,
     "import { SubscriptionTracker, type SocketKind, type SubscriptionMethod } from './subscription-tracker.ts';",
     "import { parseTicker24hChangePercent } from './binance-ticker.ts';\n"
+    "import { compactMarketStructureForPublicSnapshot } from './public-snapshot.ts';\n"
     "import { SubscriptionTracker, type SocketKind, type SubscriptionMethod } from './subscription-tracker.ts';",
 )
 replace_once(
@@ -77,6 +78,26 @@ binance_ticker.write_text("""export function parseTicker24hChangePercent(payload
   if (typeof value !== 'string' || value.trim() === '') return null;
   const percent = Number(value);
   return Number.isFinite(percent) ? percent : null;
+}
+""", encoding='utf-8')
+
+public_snapshot = Path('apps/api/src/public-snapshot.ts')
+public_snapshot.write_text("""export interface PublicZone {
+  currentRole: 'SUPPORT' | 'RESISTANCE';
+  center: number;
+}
+
+/** Keep internal pivot history on the server and send only dashboard-visible zones. */
+export function compactMarketStructureForPublicSnapshot<
+  TZone extends PublicZone,
+  TStructure extends { byInterval: unknown; zones: readonly TZone[] },
+>(structure: TStructure, currentPrice: number) {
+  const { byInterval: _algorithmOnly, zones, ...publicFields } = structure;
+  const nearest = (role: PublicZone['currentRole']) => zones
+    .filter((zone) => zone.currentRole === role)
+    .sort((left, right) => Math.abs(left.center - currentPrice) - Math.abs(right.center - currentPrice))
+    .slice(0, 4);
+  return { ...publicFields, zones: [...nearest('SUPPORT'), ...nearest('RESISTANCE')] };
 }
 """, encoding='utf-8')
 replace_once(
@@ -131,6 +152,11 @@ replace_once(
     "        log('error', 'Market snapshot listener failed', { error: error instanceof Error ? error.message : String(error) });\n"
     "      }\n"
     "    }",
+)
+replace_once(
+    market_path,
+    "          structure: state.structure,",
+    "          structure: compactMarketStructureForPublicSnapshot(state.structure, Number(state.lastPrice ?? 0)),",
 )
 
 
@@ -202,6 +228,19 @@ replace_once(
 
 
 repository_path = 'apps/api/src/watchlist-repository.ts'
+replace_once(
+    repository_path,
+    "      ON CONFLICT (signal_uid) WHERE signal_uid IS NOT NULL DO UPDATE SET\n"
+    "        lifecycle = EXCLUDED.lifecycle, state = EXCLUDED.state, snapshot = EXCLUDED.snapshot,",
+    "      // The original schema already guarantees this fingerprint is unique. Older rows\n"
+    "      // can have a null signal_uid, so targeting signal_uid alone misses their conflict.\n"
+    "      ON CONFLICT (symbol_id, interval, structure_fingerprint) DO UPDATE SET\n"
+    "        signal_uid = EXCLUDED.signal_uid, direction = EXCLUDED.direction, score = EXCLUDED.score,\n"
+    "        current_price = EXCLUDED.current_price, entry_low = EXCLUDED.entry_low, entry_high = EXCLUDED.entry_high,\n"
+    "        invalidation_price = EXCLUDED.invalidation_price, tp1 = EXCLUDED.tp1, tp2 = EXCLUDED.tp2, tp3 = EXCLUDED.tp3,\n"
+    "        risk_reward = EXCLUDED.risk_reward, reasons = EXCLUDED.reasons, conditions = EXCLUDED.conditions,\n"
+    "        lifecycle = EXCLUDED.lifecycle, state = EXCLUDED.state, snapshot = EXCLUDED.snapshot,",
+)
 replace_once(
     repository_path,
     "    try {\n"
@@ -356,6 +395,7 @@ notification_test.write_text("""import assert from 'node:assert/strict';
 import test from 'node:test';
 import { parseTicker24hChangePercent } from '../src/binance-ticker.ts';
 import { isAutomaticNotificationEventAllowed } from '../src/notification-policy.ts';
+import { compactMarketStructureForPublicSnapshot } from '../src/public-snapshot.ts';
 
 test('automatic notifications use the low-noise allowlist', () => {
   assert.equal(isAutomaticNotificationEventAllowed('LONG'), true);
@@ -371,6 +411,17 @@ test('24h ticker percentage uses Binance rolling ticker field', () => {
   assert.equal(parseTicker24hChangePercent({ P: '-8.25' }), -8.25);
   assert.equal(parseTicker24hChangePercent({ P: 'not-a-number' }), null);
   assert.equal(parseTicker24hChangePercent(null), null);
+});
+
+test('public snapshots omit pivot history and keep four nearest zones per role', () => {
+  const zones = [
+    ...[90, 80, 70, 60, 50].map((center) => ({ currentRole: 'SUPPORT' as const, center })),
+    ...[110, 120, 130, 140, 150].map((center) => ({ currentRole: 'RESISTANCE' as const, center })),
+  ];
+  const compact = compactMarketStructureForPublicSnapshot({ byInterval: { '15m': { pivots: [1, 2, 3] } }, zones, marker: true }, 100);
+  assert.equal('byInterval' in compact, false);
+  assert.deepEqual(compact.zones.map((zone) => zone.center), [90, 80, 70, 60, 110, 120, 130, 140]);
+  assert.equal(compact.marker, true);
 });
 """, encoding='utf-8')
 
