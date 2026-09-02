@@ -232,8 +232,8 @@ replace_once(
     repository_path,
     "      ON CONFLICT (signal_uid) WHERE signal_uid IS NOT NULL DO UPDATE SET\n"
     "        lifecycle = EXCLUDED.lifecycle, state = EXCLUDED.state, snapshot = EXCLUDED.snapshot,",
-    "      // The original schema already guarantees this fingerprint is unique. Older rows\n"
-    "      // can have a null signal_uid, so targeting signal_uid alone misses their conflict.\n"
+    "      -- The original schema already guarantees this fingerprint is unique. Older rows\n"
+    "      -- can have a null signal_uid, so targeting signal_uid alone misses their conflict.\n"
     "      ON CONFLICT (symbol_id, interval, structure_fingerprint) DO UPDATE SET\n"
     "        signal_uid = EXCLUDED.signal_uid, direction = EXCLUDED.direction, score = EXCLUDED.score,\n"
     "        current_price = EXCLUDED.current_price, entry_low = EXCLUDED.entry_low, entry_high = EXCLUDED.entry_high,\n"
