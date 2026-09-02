@@ -642,4 +642,26 @@ replace_once(backtest_path,
     "    const request: BacktestRequest = {\n      symbol, startTime, endTime, appVersion: this.appVersion, gitCommit: this.gitCommit,",
     "    const strategyProfile = body.strategyProfile === 'BALANCED_V1' ? 'BALANCED_V1' : body.strategyProfile === 'CURRENT' || body.strategyProfile === undefined ? 'CURRENT' : null;\n    if (!strategyProfile) throw new MarketServiceError(400, 'INVALID_STRATEGY_PROFILE', 'strategyProfile 仅支持 CURRENT 或 BALANCED_V1');\n    const minimumSignalScore = body.minimumSignalScore === undefined ? 70 : Number(body.minimumSignalScore);\n    if (!Number.isFinite(minimumSignalScore) || minimumSignalScore < 0 || minimumSignalScore > 100) throw new MarketServiceError(400, 'INVALID_MINIMUM_SIGNAL_SCORE', 'minimumSignalScore 必须在 0 到 100 之间');\n    const request: BacktestRequest = {\n      symbol, startTime, endTime, strategyProfile, minimumSignalScore, appVersion: this.appVersion, gitCommit: this.gitCommit,")
 
-print('Quiet notification allowlist, exact Binance 24h ticker, listener isolation, API logging, and settings migration applied')
+# A signal may move from CANDIDATE straight to ACTIVE when price is already in
+# the entry zone. Send the normal LONG/SHORT event in that case; ENTRY remains off.
+replace_once(notification_path,
+"""      this.initialized = true;
+      return;""",
+"""      this.initialized = true;
+      // Recover only recent ACTIVE setups after a restart. The shared READY event
+      // key and notification_audit unique constraint prevent duplicate pushes.
+      for (const item of snapshot.symbols) {
+        const enteredAt = item.signal?.enteredAt;
+        if (item.signal?.state === 'ACTIVE' && enteredAt !== null && enteredAt !== undefined
+          && snapshot.generatedAt - enteredAt <= 2 * 60 * 60_000) {
+          await this.processTransitions(item, {
+            dataStatus: item.dataStatus, signalId: null, signalState: null, signalDecision: null,
+          });
+        }
+      }
+      return;""")
+replace_once(notification_path,
+    "const hasReadyEvent = (isNewSignal || stateChanged || decisionChanged) && signal.state === 'READY' && Boolean(readyDirection);",
+    "const hasReadyEvent = (isNewSignal || stateChanged || decisionChanged)\n      && (signal.state === 'READY' || signal.state === 'ACTIVE') && Boolean(readyDirection);")
+
+print('Quiet notification allowlist, exact Binance 24h ticker, listener isolation, API logging, settings migration, and direct-ACTIVE recovery applied')
