@@ -42,6 +42,48 @@ export function isAutomaticNotificationEventAllowed(eventType: NotificationEvent
 }
 """, encoding='utf-8')
 
+replace_once(
+    notification_path,
+    "    if (this.config.ntfy.enabled && this.config.ntfy.baseUrl && this.config.ntfy.topic) {\n"
+    "      try {\n"
+    "        await this.sendToNtfy(message);\n"
+    "        counts.sent += 1;\n"
+    "      } catch (error) {\n"
+    "        counts.failed += 1;\n"
+    "        console.error(JSON.stringify({\n"
+    "          level: 'error',\n"
+    "          message: 'Honor/ntfy fallback delivery failed',\n"
+    "          symbol: message.symbol,\n"
+    "          eventKey: message.eventKey,\n"
+    "          error: error instanceof Error ? error.message : String(error),\n"
+    "        }));\n"
+    "      }\n"
+    "    }",
+    "    if (this.config.ntfy.enabled && this.config.ntfy.baseUrl && this.config.ntfy.topic) {\n"
+    "      // Audit only automatic trading events. Creating this record never emits a push.\n"
+    "      const auditId = ignoreSettings ? -1 : await this.repository.claimNotificationAudit({\n"
+    "        eventKey: message.eventKey, symbol: message.symbol, eventType: message.eventType,\n"
+    "        signalUid: message.signalUid, title: message.title, body: message.body, payload: message.data,\n"
+    "      });\n"
+    "      // A claimed event is sent once; an existing event is already audited and suppressed as a duplicate.\n"
+    "      if (ignoreSettings || auditId !== null) {\n"
+    "        try {\n"
+    "          await this.sendToNtfy(message);\n"
+    "          counts.sent += 1;\n"
+    "          if (auditId !== -1 && auditId !== null) await this.repository.finishNotificationAudit(auditId, 'SENT');\n"
+    "        } catch (error) {\n"
+    "          counts.failed += 1;\n"
+    "          const errorMessage = error instanceof Error ? error.message : String(error);\n"
+    "          if (auditId !== -1 && auditId !== null) await this.repository.finishNotificationAudit(auditId, 'FAILED', errorMessage);\n"
+    "          console.error(JSON.stringify({\n"
+    "            level: 'error', message: 'Honor/ntfy fallback delivery failed',\n"
+    "            symbol: message.symbol, eventKey: message.eventKey, error: errorMessage,\n"
+    "          }));\n"
+    "        }\n"
+    "      }\n"
+    "    }",
+)
+
 
 market_path = 'apps/api/src/market-service.ts'
 replace_once(
@@ -180,6 +222,20 @@ replace_once(
     "      }\n"
     "      for (const key of ['notifyLong','notifyShort','notifyEntry','notifyTp','notifyStop','notifyDataError'] as const) {",
 )
+replace_once(
+    app_path,
+    "    if (request.method === 'POST' && url.pathname === '/notifications/test') {",
+    "    if (request.method === 'GET' && url.pathname === '/notifications/audit') {\n"
+    "      if (!repository) throw new MarketServiceError(503, 'NOTIFICATIONS_UNAVAILABLE', '通知服务未启用');\n"
+    "      const requestedHours = Number.parseInt(url.searchParams.get('hours') ?? '24', 10);\n"
+    "      const requestedLimit = Number.parseInt(url.searchParams.get('limit') ?? '200', 10);\n"
+    "      const hours = Number.isFinite(requestedHours) ? Math.max(1, Math.min(720, requestedHours)) : 24;\n"
+    "      const limit = Number.isFinite(requestedLimit) ? Math.max(1, Math.min(500, requestedLimit)) : 200;\n"
+    "      writeJson(request, response, config, 200, { hours, items: await repository.listNotificationAudit(hours, limit) });\n"
+    "      return;\n"
+    "    }\n\n"
+    "    if (request.method === 'POST' && url.pathname === '/notifications/test') {",
+)
 
 
 backtest_path = 'apps/api/src/backtest-service.ts'
@@ -230,6 +286,17 @@ replace_once(
 repository_path = 'apps/api/src/watchlist-repository.ts'
 replace_once(
     repository_path,
+    "export interface BacktestRunRecord {",
+    "export interface NotificationAuditRow {\n"
+    "  id: number; eventKey: string; symbol: string; eventType: string; signalUid: string | null;\n"
+    "  title: string; body: string; payload: Record<string, unknown>;\n"
+    "  status: 'QUEUED' | 'SENT' | 'FAILED'; errorMessage: string | null;\n"
+    "  createdAt: string; sentAt: string | null;\n"
+    "}\n\n"
+    "export interface BacktestRunRecord {",
+)
+replace_once(
+    repository_path,
     "      ON CONFLICT (signal_uid) WHERE signal_uid IS NOT NULL DO UPDATE SET\n"
     "        lifecycle = EXCLUDED.lifecycle, state = EXCLUDED.state, snapshot = EXCLUDED.snapshot,",
     "      -- The original schema already guarantees this fingerprint is unique. Older rows\n"
@@ -240,6 +307,36 @@ replace_once(
     "        invalidation_price = EXCLUDED.invalidation_price, tp1 = EXCLUDED.tp1, tp2 = EXCLUDED.tp2, tp3 = EXCLUDED.tp3,\n"
     "        risk_reward = EXCLUDED.risk_reward, reasons = EXCLUDED.reasons, conditions = EXCLUDED.conditions,\n"
     "        lifecycle = EXCLUDED.lifecycle, state = EXCLUDED.state, snapshot = EXCLUDED.snapshot,",
+)
+replace_once(
+    repository_path,
+    "  async close(): Promise<void> {\n"
+    "    await this.pool.end();\n"
+    "  }",
+    "  async claimNotificationAudit(input: { eventKey: string; symbol: string; eventType: string; signalUid: string | null; title: string; body: string; payload: Record<string, unknown> }): Promise<number | null> {\n"
+    "    const result = await this.pool.query<{ id: string }>(`\n"
+    "      INSERT INTO notification_audit (event_key,symbol,event_type,signal_uid,title,body,payload,status)\n"
+    "      VALUES ($1,$2,$3,$4,$5,$6,$7,'QUEUED')\n"
+    "      ON CONFLICT (event_key) DO NOTHING RETURNING id\n"
+    "    `, [input.eventKey,input.symbol,input.eventType,input.signalUid,input.title,input.body,JSON.stringify(input.payload)]);\n"
+    "    return result.rows[0] ? Number(result.rows[0].id) : null;\n"
+    "  }\n\n"
+    "  async finishNotificationAudit(id: number, status: 'SENT' | 'FAILED', errorMessage: string | null = null): Promise<void> {\n"
+    "    await this.pool.query(`UPDATE notification_audit SET status=$2,error_message=$3,sent_at=CASE WHEN $2='SENT' THEN now() ELSE NULL END WHERE id=$1`, [id,status,errorMessage]);\n"
+    "  }\n\n"
+    "  async listNotificationAudit(hours = 24, limit = 200): Promise<NotificationAuditRow[]> {\n"
+    "    const safeHours = Math.max(1, Math.min(720, Math.trunc(hours)));\n"
+    "    const safeLimit = Math.max(1, Math.min(500, Math.trunc(limit)));\n"
+    "    const result = await this.pool.query<{ id:string;event_key:string;symbol:string;event_type:string;signal_uid:string|null;title:string;body:string;payload:Record<string,unknown>;status:NotificationAuditRow['status'];error_message:string|null;created_at:Date;sent_at:Date|null }>(`\n"
+    "      SELECT id,event_key,symbol,event_type,signal_uid,title,body,payload,status,error_message,created_at,sent_at\n"
+    "      FROM notification_audit WHERE created_at >= now() - ($1 * interval '1 hour')\n"
+    "      ORDER BY created_at DESC LIMIT $2\n"
+    "    `, [safeHours,safeLimit]);\n"
+    "    return result.rows.map((row) => ({ id:Number(row.id),eventKey:row.event_key,symbol:row.symbol,eventType:row.event_type,signalUid:row.signal_uid,title:row.title,body:row.body,payload:row.payload,status:row.status,errorMessage:row.error_message,createdAt:row.created_at.toISOString(),sentAt:row.sent_at?.toISOString() ?? null }));\n"
+    "  }\n\n"
+    "  async close(): Promise<void> {\n"
+    "    await this.pool.end();\n"
+    "  }",
 )
 replace_once(
     repository_path,
@@ -386,6 +483,25 @@ SET minimum_signal_score = 70,
     notify_stop = true,
     notify_data_error = false,
     updated_at = now();
+""", encoding='utf-8')
+
+audit_migration = Path('packages/database/migrations/0006_notification_audit.sql')
+audit_migration.write_text("""CREATE TABLE IF NOT EXISTS notification_audit (
+  id bigserial PRIMARY KEY,
+  event_key text NOT NULL UNIQUE,
+  symbol text NOT NULL,
+  event_type text NOT NULL CHECK (event_type IN ('LONG','SHORT','TP','STOP')),
+  signal_uid text,
+  title text NOT NULL,
+  body text NOT NULL,
+  payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  status text NOT NULL CHECK (status IN ('QUEUED','SENT','FAILED')),
+  error_message text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  sent_at timestamptz
+);
+CREATE INDEX IF NOT EXISTS notification_audit_created_idx ON notification_audit (created_at DESC);
+CREATE INDEX IF NOT EXISTS notification_audit_symbol_created_idx ON notification_audit (symbol, created_at DESC);
 """, encoding='utf-8')
 
 
