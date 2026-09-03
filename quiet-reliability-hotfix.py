@@ -695,4 +695,99 @@ replace_once(repository_path,
           WHEN signals.state='TP1_HIT' AND EXCLUDED.state='ACTIVE' THEN signals.snapshot
           ELSE EXCLUDED.snapshot END,""")
 
-print('Quiet notification allowlist, exact Binance 24h ticker, listener isolation, API logging, settings migration, direct-ACTIVE recovery, and monotonic TP lifecycle/database recovery applied')
+# Add a bounded order-flow boost using Binance aggTrade data already received by
+# the service. It is score-only (max 8), adds no gate and emits no new event type.
+replace_once(signal_engine_path,
+    "  continuationMinimumVolumeRatio: number;\n  expiresAfterMs: number;",
+    "  continuationMinimumVolumeRatio: number;\n  flowBoostMaximumScore: number;\n  expiresAfterMs: number;")
+replace_once(signal_engine_path,
+    "  continuationMinimumVolumeRatio: 0,\n  expiresAfterMs:",
+    "  continuationMinimumVolumeRatio: 0,\n  flowBoostMaximumScore: 8,\n  expiresAfterMs:")
+replace_once(signal_engine_path,
+    "  health: SignalHealth;\n  evaluatedAt: number;",
+"""  health: SignalHealth;
+  orderFlow?: {
+    aggressiveBuyShare: number;
+    quoteVolumeAcceleration: number;
+    recentTradeCount: number;
+  } | null;
+  evaluatedAt: number;""")
+replace_once(signal_engine_path,
+"""  addScore('HEALTH', true, config.scoreWeights.health, '行情、时钟、订阅与历史数据健康');
+  const score = Math.round(scoreReasons.reduce((sum, reason) => sum + reason.score, 0) * 100) / 100;""",
+"""  addScore('HEALTH', true, config.scoreWeights.health, '行情、时钟、订阅与历史数据健康');
+  const flow = input.orderFlow;
+  const directionalShare = direction === 'LONG' ? flow?.aggressiveBuyShare ?? 0 : 1 - (flow?.aggressiveBuyShare ?? 1);
+  const flowAligned = Boolean(flow && flow.recentTradeCount >= 30
+    && flow.quoteVolumeAcceleration >= 1.8 && directionalShare >= 0.65);
+  const flowBoost = flowAligned
+    ? clamp(4 + (directionalShare - 0.65) * 10 + (flow!.quoteVolumeAcceleration - 1.8), 4, config.flowBoostMaximumScore)
+    : 0;
+  addScore('FLOW_BOOST', flowAligned, flowBoost,
+    `5m 主动${direction === 'LONG' ? '买入' : '卖出'}占比 ${(directionalShare * 100).toFixed(1)}% · 成交额加速 ${flow?.quoteVolumeAcceleration.toFixed(2)}x`);
+  const score = Math.min(100, Math.round(scoreReasons.reduce((sum, reason) => sum + reason.score, 0) * 100) / 100);""")
+
+replace_once(market_path,
+    "import { evaluateSignal, SignalLifecycleRegistry, type SignalSnapshot } from '@fsm/signal-engine';",
+    "import { evaluateSignal, SignalLifecycleRegistry, type SignalInput, type SignalSnapshot } from '@fsm/signal-engine';")
+replace_once(market_path,
+    "interface Diagnostics {",
+"""interface AggressiveFlowBucket {
+  bucketStart: number;
+  buyQuote: number;
+  sellQuote: number;
+  tradeCount: number;
+}
+
+interface Diagnostics {""")
+replace_once(market_path,
+    "  private readonly lastCandidatePersistAt = new Map<string, number>();",
+    "  private readonly lastCandidatePersistAt = new Map<string, number>();\n  private readonly aggressiveFlow = new Map<string, AggressiveFlowBucket[]>();")
+replace_once(market_path,
+    "      structure: state.structure,\n      health,\n      evaluatedAt: now,",
+    "      structure: state.structure,\n      health,\n      orderFlow: this.orderFlowSnapshot(state.symbol, now),\n      evaluatedAt: now,")
+replace_once(market_path,
+    "  private publicStreams(symbol: string): string[] {",
+"""  private recordAggressiveFlow(symbol: string, time: number, price: number, quantity: number, buyerIsMaker: boolean): void {
+    const buckets = this.aggressiveFlow.get(symbol) ?? [];
+    const bucketStart = Math.floor(time / 10_000) * 10_000;
+    let bucket = buckets.at(-1);
+    if (!bucket || bucket.bucketStart !== bucketStart) {
+      bucket = { bucketStart, buyQuote: 0, sellQuote: 0, tradeCount: 0 };
+      buckets.push(bucket);
+    }
+    const quoteVolume = price * quantity;
+    if (buyerIsMaker) bucket.sellQuote += quoteVolume;
+    else bucket.buyQuote += quoteVolume;
+    bucket.tradeCount += 1;
+    const cutoff = time - 15 * 60_000;
+    while (buckets.length > 0 && buckets[0]!.bucketStart < cutoff) buckets.shift();
+    this.aggressiveFlow.set(symbol, buckets);
+  }
+
+  private orderFlowSnapshot(symbol: string, now: number): SignalInput['orderFlow'] {
+    const buckets = this.aggressiveFlow.get(symbol) ?? [];
+    const recent = buckets.filter((bucket) => bucket.bucketStart >= now - 5 * 60_000);
+    const baseline = buckets.filter((bucket) => bucket.bucketStart >= now - 15 * 60_000 && bucket.bucketStart < now - 5 * 60_000);
+    const recentBuyQuote = recent.reduce((sum, bucket) => sum + bucket.buyQuote, 0);
+    const recentSellQuote = recent.reduce((sum, bucket) => sum + bucket.sellQuote, 0);
+    const recentQuote = recentBuyQuote + recentSellQuote;
+    const baselineFiveMinuteQuote = baseline.reduce((sum, bucket) => sum + bucket.buyQuote + bucket.sellQuote, 0) / 2;
+    const recentTradeCount = recent.reduce((sum, bucket) => sum + bucket.tradeCount, 0);
+    if (recentTradeCount < 10 || !(recentQuote > 0) || !(baselineFiveMinuteQuote > 0)) return null;
+    return {
+      aggressiveBuyShare: recentBuyQuote / recentQuote,
+      quoteVolumeAcceleration: recentQuote / baselineFiveMinuteQuote,
+      recentTradeCount,
+    };
+  }
+
+  private publicStreams(symbol: string): string[] {""")
+replace_once(market_path,
+    "      state.lastPrice = data.p;\n      state.structure = relocateMarketStructure",
+    "      state.lastPrice = data.p;\n      if (numericString(data.q) && typeof data.m === 'boolean') {\n        this.recordAggressiveFlow(symbol, eventTime ?? receivedAt, Number(data.p), Number(data.q), data.m);\n      }\n      state.structure = relocateMarketStructure")
+replace_once(market_path,
+    "    this.backfillRetryTimers.delete(symbol);\n    this.states.delete(symbol);",
+    "    this.backfillRetryTimers.delete(symbol);\n    this.aggressiveFlow.delete(symbol);\n    this.states.delete(symbol);")
+
+print('Quiet notifications, market reliability, monotonic TP recovery, and bounded order-flow scoring applied')
