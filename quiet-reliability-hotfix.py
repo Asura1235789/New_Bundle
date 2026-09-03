@@ -670,4 +670,29 @@ replace_once(signal_engine_path,
     "else if (hit(next.targets.tp1)) next = { ...next, state: 'TP1_HIT' };",
     "else if (next.state === 'ACTIVE' && hit(next.targets.tp1)) next = { ...next, state: 'TP1_HIT' };")
 
-print('Quiet notification allowlist, exact Binance 24h ticker, listener isolation, API logging, settings migration, direct-ACTIVE recovery, and monotonic TP lifecycle applied')
+# Recover the highest historically reached TP from monotonic timestamp columns,
+# and prevent lower live states from overwriting a higher persisted TP state.
+replace_once(repository_path,
+"""    const result = await this.pool.query<{ snapshot: SignalSnapshot }>(`
+      SELECT snapshot FROM signals""",
+"""    const result = await this.pool.query<{ snapshot: SignalSnapshot; tp1_hit_at: Date | null; tp2_hit_at: Date | null; tp3_hit_at: Date | null }>(`
+      SELECT snapshot, tp1_hit_at, tp2_hit_at, tp3_hit_at FROM signals""")
+replace_once(repository_path,
+    "    return result.rows.map((row) => row.snapshot);",
+    "    return result.rows.map((row) => ({ ...row.snapshot, state: row.tp3_hit_at ? 'TP3_HIT' : row.tp2_hit_at ? 'TP2_HIT' : row.tp1_hit_at ? 'TP1_HIT' : row.snapshot.state }));")
+replace_once(repository_path,
+    "        lifecycle = EXCLUDED.lifecycle, state = EXCLUDED.state, snapshot = EXCLUDED.snapshot,",
+"""        lifecycle = CASE
+          WHEN signals.state='TP2_HIT' AND EXCLUDED.state IN ('ACTIVE','TP1_HIT') THEN signals.lifecycle
+          WHEN signals.state='TP1_HIT' AND EXCLUDED.state='ACTIVE' THEN signals.lifecycle
+          ELSE EXCLUDED.lifecycle END,
+        state = CASE
+          WHEN signals.state='TP2_HIT' AND EXCLUDED.state IN ('ACTIVE','TP1_HIT') THEN signals.state
+          WHEN signals.state='TP1_HIT' AND EXCLUDED.state='ACTIVE' THEN signals.state
+          ELSE EXCLUDED.state END,
+        snapshot = CASE
+          WHEN signals.state='TP2_HIT' AND EXCLUDED.state IN ('ACTIVE','TP1_HIT') THEN signals.snapshot
+          WHEN signals.state='TP1_HIT' AND EXCLUDED.state='ACTIVE' THEN signals.snapshot
+          ELSE EXCLUDED.snapshot END,""")
+
+print('Quiet notification allowlist, exact Binance 24h ticker, listener isolation, API logging, settings migration, direct-ACTIVE recovery, and monotonic TP lifecycle/database recovery applied')
