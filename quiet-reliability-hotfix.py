@@ -664,4 +664,10 @@ replace_once(notification_path,
     "const hasReadyEvent = (isNewSignal || stateChanged || decisionChanged) && signal.state === 'READY' && Boolean(readyDirection);",
     "const hasReadyEvent = (isNewSignal || stateChanged || decisionChanged)\n      && (signal.state === 'READY' || signal.state === 'ACTIVE') && Boolean(readyDirection);")
 
-print('Quiet notification allowlist, exact Binance 24h ticker, listener isolation, API logging, settings migration, and direct-ACTIVE recovery applied')
+# TP progress is historical state, not a live price label. Once TP2 was reached,
+# a later retrace to the TP1 area must not downgrade the lifecycle.
+replace_once(signal_engine_path,
+    "else if (hit(next.targets.tp1)) next = { ...next, state: 'TP1_HIT' };",
+    "else if (next.state === 'ACTIVE' && hit(next.targets.tp1)) next = { ...next, state: 'TP1_HIT' };")
+
+print('Quiet notification allowlist, exact Binance 24h ticker, listener isolation, API logging, settings migration, direct-ACTIVE recovery, and monotonic TP lifecycle applied')
