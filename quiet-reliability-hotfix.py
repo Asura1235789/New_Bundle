@@ -765,7 +765,11 @@ replace_once(market_path,
     this.aggressiveFlow.set(symbol, buckets);
   }
 
-  private orderFlowSnapshot(symbol: string, now: number): SignalInput['orderFlow'] {
+  private orderFlowSnapshot(symbol: string, now: number): {
+    aggressiveBuyShare: number;
+    quoteVolumeAcceleration: number;
+    recentTradeCount: number;
+  } | null {
     const buckets = this.aggressiveFlow.get(symbol) ?? [];
     const recent = buckets.filter((bucket) => bucket.bucketStart >= now - 5 * 60_000);
     const baseline = buckets.filter((bucket) => bucket.bucketStart >= now - 15 * 60_000 && bucket.bucketStart < now - 5 * 60_000);
