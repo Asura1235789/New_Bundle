@@ -297,12 +297,26 @@ replace_once(
 )
 replace_once(
     repository_path,
+    "    await this.pool.query(`\n"
+    "      INSERT INTO signals (",
+    "    await this.pool.query(`\n"
+    "      WITH duplicate_fingerprints AS (\n"
+    "        DELETE FROM signals\n"
+    "        WHERE symbol_id = (SELECT id FROM symbols WHERE symbol = $1)\n"
+    "          AND interval = '15m'\n"
+    "          AND structure_fingerprint = $15\n"
+    "          AND signal_uid IS DISTINCT FROM $15\n"
+    "      )\n"
+    "      INSERT INTO signals (",
+)
+replace_once(
+    repository_path,
     "      ON CONFLICT (signal_uid) WHERE signal_uid IS NOT NULL DO UPDATE SET\n"
     "        lifecycle = EXCLUDED.lifecycle, state = EXCLUDED.state, snapshot = EXCLUDED.snapshot,",
-    "      -- The original schema already guarantees this fingerprint is unique. Older rows\n"
-    "      -- can have a null signal_uid, so targeting signal_uid alone misses their conflict.\n"
-    "      ON CONFLICT (symbol_id, interval, structure_fingerprint) DO UPDATE SET\n"
-    "        signal_uid = EXCLUDED.signal_uid, direction = EXCLUDED.direction, score = EXCLUDED.score,\n"
+    "      -- A signal UID is the canonical lifecycle identity. The cleanup CTE removes a\n"
+    "      -- stale legacy row that owns the same fingerprint under a different/null UID.\n"
+    "      ON CONFLICT (signal_uid) WHERE signal_uid IS NOT NULL DO UPDATE SET\n"
+    "        structure_fingerprint = EXCLUDED.structure_fingerprint, direction = EXCLUDED.direction, score = EXCLUDED.score,\n"
     "        current_price = EXCLUDED.current_price, entry_low = EXCLUDED.entry_low, entry_high = EXCLUDED.entry_high,\n"
     "        invalidation_price = EXCLUDED.invalidation_price, tp1 = EXCLUDED.tp1, tp2 = EXCLUDED.tp2, tp3 = EXCLUDED.tp3,\n"
     "        risk_reward = EXCLUDED.risk_reward, reasons = EXCLUDED.reasons, conditions = EXCLUDED.conditions,\n"
